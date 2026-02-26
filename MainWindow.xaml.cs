@@ -5,13 +5,12 @@ using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Data;
 using System.Windows.Media;
-using ExcelToSqlImporter.Models;
-using ExcelToSqlImporter.Services;
+using Excel2SQLExporter.Models;
+using Excel2SQLExporter.Services;
 using Microsoft.Win32;
 
-namespace ExcelToSqlImporter;
+namespace Excel2SQLExporter;
 
-// ─── C# 14: primary constructor — no boilerplate constructor body ─────────────
 /// <summary>
 /// Converts bool (IsValid) to ✅ / ⚠️ in the DataGrid Valid column.
 /// </summary>
@@ -26,22 +25,96 @@ public class BoolToTickConverter : IValueConverter
 
 public partial class MainWindow : Window
 {
-    // C# 14: field keyword — lazy-initialised, no separate backing field
+    // C# 14: field keyword — lazy-initialised reader, no separate backing field
     private ExcelReaderService ExcelReader
     {
         get => field ??= new ExcelReaderService();
     }
 
-    private List<ExcelProductRow> _previewRows = [];       // C# 14: collection expression
+    private List<ExcelProductRow> _previewRows = [];
     private CancellationTokenSource? _cts;
     private ImportSummary? _lastSummary;
+
+    // Currently selected voucher mode — driven by radio buttons
+    private VoucherMode SelectedVoucherMode
+        => RadioBatchSingle.IsChecked == true
+            ? VoucherMode.BatchSingle
+            : VoucherMode.PerProduct;
+
+    // Whether to insert PrintBarCodes rows — driven by the checkbox
+    private bool InsertBarcodes => ChkInsertBarcodes.IsChecked == true;
 
     public MainWindow()
     {
         InitializeComponent();
-        Log("👋  Ready. Paste your connection string → select an Excel file → Preview → Import.");
-        Log("ℹ️   Each row writes to 9 tables: Brands, Categories, Groups, Product, Stock,");
-        Log("     BillNumbers, StockTransaction, Voucher, AccountsTransaction.");
+
+        // Set window icon from embedded resource — more reliable than XAML Icon= attribute
+        // which can fail with BAML pack URI resolution depending on build configuration.
+        try
+        {
+            var uri    = new Uri("pack://application:,,,/Excel2SQLExporter;component/app.ico");
+            var stream = Application.GetResourceStream(uri);
+            if (stream != null)
+                Icon = System.Windows.Media.Imaging.BitmapFrame.Create(
+                    stream.Stream,
+                    System.Windows.Media.Imaging.BitmapCreateOptions.None,
+                    System.Windows.Media.Imaging.BitmapCacheOption.OnLoad);
+        }
+        catch
+        {
+            // Non-fatal — app runs fine without a custom window icon
+        }
+
+        Log("👋  Ready. Set connection string → select Excel file → choose voucher mode → Preview → Import.");
+        Log("ℹ️   Per-product mode: one JUR per row.  Batch mode: one JUR shared by all rows.");
+    }
+
+    // ─── VOUCHER MODE RADIO ───────────────────────────────────────────────────
+
+    private void VoucherModeChanged(object sender, RoutedEventArgs e)
+    {
+        // Guard: may fire before InitializeComponent completes
+        if (TxtVoucherModeBadge is null || BadgeVoucherMode is null) return;
+
+        if (SelectedVoucherMode == VoucherMode.BatchSingle)
+        {
+            TxtVoucherModeBadge.Text           = "● Batch Single";
+            BadgeVoucherMode.Background        = new SolidColorBrush(Color.FromRgb(240, 253, 244));
+            TxtVoucherModeBadge.Foreground     = new SolidColorBrush(Color.FromRgb(21,  128, 61));
+        }
+        else
+        {
+            TxtVoucherModeBadge.Text           = "● Per Product";
+            BadgeVoucherMode.Background        = new SolidColorBrush(Color.FromRgb(239, 246, 255));
+            TxtVoucherModeBadge.Foreground     = new SolidColorBrush(Color.FromRgb(37,  99,  235));
+        }
+
+        // Hide batch voucher badge from a previous run when mode changes
+        BadgeBatchVoucher.Visibility = Visibility.Collapsed;
+
+        Log($"📒  Voucher mode: {SelectedVoucherMode switch {
+            VoucherMode.PerProduct  => "One voucher per product row",
+            VoucherMode.BatchSingle => "One voucher for entire batch",
+            _                       => "Unknown"
+        }}");
+    }
+
+    // ─── BARCODE CHECKBOX ─────────────────────────────────────────────────────
+
+    private void ChkInsertBarcodes_Changed(object sender, RoutedEventArgs e)
+    {
+        if (BadgeBarcodeOption is null) return;
+
+        if (InsertBarcodes)
+        {
+            BadgeBarcodeOption.Visibility = Visibility.Visible;
+            Log("🏷️  Barcode insert ON — PrintBarCodes will receive Qty rows per product.");
+        }
+        else
+        {
+            BadgeBarcodeOption.Visibility = Visibility.Collapsed;
+            Log("🏷️  Barcode insert OFF — PrintBarCodes will not be written.");
+        }
     }
 
     // ─── TEST CONNECTION ──────────────────────────────────────────────────────
@@ -77,12 +150,14 @@ public partial class MainWindow : Window
         TxtFilePath.Text = dlg.FileName;
         Log($"📂  File selected: {Path.GetFileName(dlg.FileName)}");
 
-        // Reset state
-        _previewRows            = [];
-        PreviewGrid.ItemsSource = null;
-        TxtRowCount.Text        = "0 rows";
-        BtnImport.IsEnabled     = false;
-        BadgeWarnings.Visibility = Visibility.Collapsed;
+        _previewRows              = [];
+        PreviewGrid.ItemsSource   = null;
+        TxtRowCount.Text          = "0 rows";
+        BtnImport.IsEnabled       = false;
+        BtnRecall.IsEnabled       = false;
+        BtnImportSelected.IsEnabled = false;
+        BadgeSelected.Visibility  = Visibility.Collapsed;
+        BadgeWarnings.Visibility  = Visibility.Collapsed;
     }
 
     // ─── PREVIEW ──────────────────────────────────────────────────────────────
@@ -110,6 +185,7 @@ public partial class MainWindow : Window
             int invalidCount = rows.Count(r => !r.IsValid);
             int withSize     = rows.Count(r => !string.IsNullOrWhiteSpace(r.ProductSize));
             int truncated    = rows.Count(r => r.ProductName.Length > 40);
+            decimal batchTotal = rows.Where(r => r.IsValid).Sum(r => r.TotalValue);
 
             TxtRowCount.Text = $"{rows.Count} rows";
 
@@ -124,16 +200,15 @@ public partial class MainWindow : Window
                 BadgeWarnings.Visibility = Visibility.Collapsed;
             }
 
-            Log($"✅  Preview loaded — {rows.Count} rows total:");
+            Log($"✅  Preview loaded — {rows.Count} rows:");
             Log($"     ✅ Valid          : {validCount}");
             Log($"     ⚠️  Invalid/skipped: {invalidCount}");
-            Log($"     📐 With size      : {withSize}  (ProductSize column in Stock)");
-            Log($"     ✂️  Name truncated : {truncated} (>40 chars, truncated for Product table)");
-
-            if (invalidCount > 0)
-                Log($"⚠️  Hover the ⚠️ icon in the grid for row-level details.");
+            Log($"     📐 With size      : {withSize}");
+            Log($"     ✂️  Name >40 chars  : {truncated}  (will be truncated in DB)");
+            Log($"     💰 Batch total    : {batchTotal:N2}");
 
             BtnImport.IsEnabled = validCount > 0;
+            BtnRecall.IsEnabled = validCount > 0;
         }
         catch (Exception ex)
         {
@@ -143,7 +218,34 @@ public partial class MainWindow : Window
         }
     }
 
-    // ─── IMPORT ───────────────────────────────────────────────────────────────
+
+    // ─── SELECTION CHANGED ────────────────────────────────────────────────────
+
+    private void PreviewGrid_SelectionChanged(object sender,
+        System.Windows.Controls.SelectionChangedEventArgs e)
+    {
+        int total = PreviewGrid.SelectedItems.Count;
+        int valid = PreviewGrid.SelectedItems
+            .Cast<ExcelProductRow>()
+            .Count(r => r.IsValid);
+
+        if (total > 0)
+        {
+            BadgeSelected.Visibility = Visibility.Visible;
+            TxtSelectedCount.Text    = valid < total
+                ? $"{total} selected  ({valid} valid)"
+                : $"{total} selected";
+        }
+        else
+        {
+            BadgeSelected.Visibility = Visibility.Collapsed;
+        }
+
+        // Enable only when at least one valid row is highlighted and not mid-import
+        BtnImportSelected.IsEnabled = valid > 0 && !BtnCancel.IsEnabled;
+    }
+
+    // ─── IMPORT ALL ───────────────────────────────────────────────────────────
 
     private async void BtnImport_Click(object sender, RoutedEventArgs e)
     {
@@ -154,52 +256,127 @@ public partial class MainWindow : Window
             return;
         }
 
+        if (!ConfirmImport(_previewRows, "all valid rows")) return;
+        await ExecuteImportAsync(_previewRows, "All rows");
+    }
+
+    // ─── IMPORT SELECTED ─────────────────────────────────────────────────────
+
+    private async void BtnImportSelected_Click(object sender, RoutedEventArgs e)
+    {
+        if (PreviewGrid.SelectedItems.Count == 0)
+        {
+            MessageBox.Show(
+                "No rows are selected in the preview grid.\n\n" +
+                "Click a row to select it, Ctrl+Click for individual rows, Shift+Click for a range.",
+                "Nothing Selected", MessageBoxButton.OK, MessageBoxImage.Information);
+            return;
+        }
+
+        var rowsToImport = PreviewGrid.SelectedItems
+            .Cast<ExcelProductRow>()
+            .ToList();
+
+        int validCount = rowsToImport.Count(r => r.IsValid);
+        if (validCount == 0)
+        {
+            MessageBox.Show(
+                "None of the selected rows are valid (check the ✓ column).\n\n" +
+                "Only valid rows can be imported.",
+                "No Valid Rows", MessageBoxButton.OK, MessageBoxImage.Warning);
+            return;
+        }
+
+        string scope = rowsToImport.Count == validCount
+            ? $"{validCount} selected rows"
+            : $"{validCount} valid of {rowsToImport.Count} selected rows";
+
+        if (!ConfirmImport(rowsToImport, scope)) return;
+        await ExecuteImportAsync(rowsToImport, $"Selected ({validCount} rows)");
+    }
+
+    // ─── SHARED: confirm dialog ───────────────────────────────────────────────
+
+    private bool ConfirmImport(List<ExcelProductRow> rows, string scope)
+    {
         string connStr = TxtConnectionString.Text.Trim();
         if (string.IsNullOrWhiteSpace(connStr))
         {
             MessageBox.Show("Please enter a SQL Server connection string.",
                 "No Connection", MessageBoxButton.OK, MessageBoxImage.Warning);
-            return;
+            return false;
         }
 
-        int validCount = _previewRows.Count(r => r.IsValid);
+        var     mode        = SelectedVoucherMode;
+        bool    barcodes    = InsertBarcodes;
+        int     validCount  = rows.Count(r => r.IsValid);
+        decimal batchTotal  = rows.Where(r => r.IsValid).Sum(r => r.TotalValue);
+        int     totalLabels = barcodes
+            ? rows.Where(r => r.IsValid).Sum(r => (int)Math.Floor(r.Quantity))
+            : 0;
+
+        string modeDesc = mode == VoucherMode.PerProduct
+            ? $"  • {validCount} separate JUR numbers (one per row)\n" +
+              $"  • {validCount} Voucher records\n" +
+              $"  • {validCount * 2} AccountsTransaction rows"
+            : $"  • 1 shared JUR number for all rows\n" +
+              $"  • 1 Voucher record (total: {batchTotal:N2})\n" +
+              $"  • 2 AccountsTransaction rows";
+
+        string barcodeDesc = barcodes
+            ? $"\n\n🏷️  Barcodes: {totalLabels} label rows → PrintBarCodes"
+            : string.Empty;
 
         var confirm = MessageBox.Show(
-            $"Ready to import {validCount} valid rows into SimplePOSDB.\n\n" +
-            "For each row the tool will:\n" +
-            "  1.  Check / insert  ProductBrands\n" +
-            "  2.  Check / insert  ProductCategories\n" +
-            "  3.  Check / insert  ProductGroups  (default: General)\n" +
-            "  4.  Insert          Product         (only if new ProductCode)\n" +
-            "  5.  Insert          Stock           (always — with ProductSize)\n" +
-            "  6.  Increment       BillNumbers.JournalVoucherNo\n" +
-            "  7.  Insert          StockTransaction\n" +
-            "  8.  Insert          Voucher         (Opening Stock Balance)\n" +
-            "  9.  Insert 2 rows   AccountsTransaction  (Debit 141 / Credit 92)\n\n" +
-            "Each row is its own transaction — one failure won't affect others.\n\n" +
-            "Continue?",
+            $"Ready to import {validCount} valid rows  ({scope}).\n\n" +
+            $"Voucher Mode: {(mode == VoucherMode.PerProduct ? "ONE VOUCHER PER PRODUCT" : "ONE VOUCHER FOR ENTIRE BATCH")}\n\n" +
+            $"{modeDesc}\n\n" +
+            "Each row also writes: Product (if new) · Stock · StockTransaction" +
+            barcodeDesc + "\n\n" +
+            "Per-row failures are isolated — they won't affect other rows.\n\nContinue?",
             "Confirm Import",
             MessageBoxButton.YesNo,
             MessageBoxImage.Question);
 
-        if (confirm != MessageBoxResult.Yes) return;
+        return confirm == MessageBoxResult.Yes;
+    }
 
-        // ── Set up UI for import ──────────────────────────────────────────────
+    // ─── SHARED: run import, update all UI ───────────────────────────────────
+
+    private async Task ExecuteImportAsync(List<ExcelProductRow> rowsToImport, string label)
+    {
+        string  connStr    = TxtConnectionString.Text.Trim();
+        var     mode       = SelectedVoucherMode;
+        bool    barcodes   = InsertBarcodes;
+        int     validCount = rowsToImport.Count(r => r.IsValid);
+        decimal batchTotal = rowsToImport.Where(r => r.IsValid).Sum(r => r.TotalValue);
+        int     totalLabels = barcodes
+            ? rowsToImport.Where(r => r.IsValid).Sum(r => (int)Math.Floor(r.Quantity))
+            : 0;
+
         SetImportingState(true);
         ResetBadges();
+        BadgeBatchVoucher.Visibility = Visibility.Collapsed;
         ImportLog.Items.Clear();
         ImportProgress.Value  = 0;
         TxtProgressLabel.Text = "0%";
+
         Log($"🚀  Import started — {DateTime.Now:HH:mm:ss}");
-        Log($"    {validCount} rows to process...");
+        Log($"    Scope   : {label}  ({validCount} valid rows)");
+        Log($"    Mode    : {(mode == VoucherMode.PerProduct ? "Per Product" : "Batch Single")}");
+        Log($"    Total   : {batchTotal:N2}");
+        if (barcodes) Log($"    Labels  : {totalLabels} barcode rows → PrintBarCodes");
 
         _cts = new CancellationTokenSource();
 
         var progress = new Progress<(int Current, int Total, string Message)>(p =>
         {
-            double pct            = (double)p.Current / p.Total * 100;
-            ImportProgress.Value  = pct;
-            TxtProgressLabel.Text = $"{pct:F0}%";
+            if (p.Total > 0)
+            {
+                double pct            = (double)p.Current / p.Total * 100;
+                ImportProgress.Value  = Math.Min(100, pct);
+                TxtProgressLabel.Text = $"{pct:F0}%";
+            }
             Log(p.Message);
             ScrollLog();
         });
@@ -207,9 +384,8 @@ public partial class MainWindow : Window
         try
         {
             _lastSummary = await new SqlImportService(connStr)
-                .ImportAsync(_previewRows, progress, _cts.Token);
+                .ImportAsync(rowsToImport, mode, barcodes, progress, _cts.Token);
 
-            // ── Update badges ─────────────────────────────────────────────────
             TxtNewCount.Text     = $"✅ New: {_lastSummary.NewProducts}";
             TxtStockCount.Text   = $"🔄 Stock Added: {_lastSummary.ExistingProducts}";
             TxtSkippedCount.Text = $"⚠️ Skipped: {_lastSummary.Skipped}";
@@ -217,32 +393,58 @@ public partial class MainWindow : Window
             ImportProgress.Value  = 100;
             TxtProgressLabel.Text = "100%";
 
-            // ── Summary log ───────────────────────────────────────────────────
+            if (_lastSummary.BarcodesEnabled)
+            {
+                TxtBarcodeCount.Text         = $"🏷️ Labels: {_lastSummary.TotalBarcodesInserted}";
+                BadgeBarcodeCount.Visibility = Visibility.Visible;
+            }
+            else
+            {
+                BadgeBarcodeCount.Visibility = Visibility.Collapsed;
+            }
+
+            if (mode == VoucherMode.BatchSingle && !string.IsNullOrEmpty(_lastSummary.BatchVoucherNo))
+            {
+                TxtBatchVoucherNo.Text       = $"📒 Batch: {_lastSummary.BatchVoucherNo}  ({_lastSummary.BatchTotalValue:N2})";
+                BadgeBatchVoucher.Visibility = Visibility.Visible;
+            }
+
             Log("─────────────────────────────────────────────────");
-            Log($"✅  Import complete — {_lastSummary.EndTime:HH:mm:ss}");
-            Log($"    Total rows    : {_lastSummary.TotalRows}");
+            Log($"✅  Complete — {_lastSummary.EndTime:HH:mm:ss}");
             Log($"    New products  : {_lastSummary.NewProducts}");
             Log($"    Stock added   : {_lastSummary.ExistingProducts}");
             Log($"    Skipped       : {_lastSummary.Skipped}");
             Log($"    Errors        : {_lastSummary.Errors}");
+            if (_lastSummary.BarcodesEnabled)
+                Log($"    Label rows    : {_lastSummary.TotalBarcodesInserted}  (PrintBarCodes)");
+            if (mode == VoucherMode.BatchSingle)
+                Log($"    Batch voucher : {_lastSummary.BatchVoucherNo}  (total: {_lastSummary.BatchTotalValue:N2})");
             Log($"    Duration      : {_lastSummary.Duration.TotalSeconds:F1}s");
             Log("─────────────────────────────────────────────────");
 
-            // ── Show errors in log ────────────────────────────────────────────
             if (_lastSummary.Errors > 0)
             {
-                Log("❌  Rows with errors:");
+                Log("❌  Error details:");
                 foreach (var r in _lastSummary.Results.Where(r => r.Status == ImportStatus.Error))
                     Log($"     Row {r.RowNumber} [{r.ProductCode}]: {r.Message}");
             }
 
+            string barcodeLine = _lastSummary.BarcodesEnabled
+                ? $"\n🏷️  Label rows     : {_lastSummary.TotalBarcodesInserted}  (PrintBarCodes)"
+                : string.Empty;
+
+            string batchLine = mode == VoucherMode.BatchSingle
+                ? $"\n📒  Batch Voucher  : {_lastSummary.BatchVoucherNo}  ({_lastSummary.BatchTotalValue:N2})"
+                : string.Empty;
+
             MessageBox.Show(
-                $"Import complete!\n\n" +
+                $"Import complete!  [{label}]\n\n" +
                 $"✅  New products  : {_lastSummary.NewProducts}\n" +
                 $"🔄  Stock added   : {_lastSummary.ExistingProducts}\n" +
                 $"⚠️   Skipped       : {_lastSummary.Skipped}\n" +
-                $"❌  Errors        : {_lastSummary.Errors}\n\n" +
-                $"Duration: {_lastSummary.Duration.TotalSeconds:F1} seconds\n\n" +
+                $"❌  Errors        : {_lastSummary.Errors}" +
+                barcodeLine + batchLine +
+                $"\n\nDuration: {_lastSummary.Duration.TotalSeconds:F1}s\n\n" +
                 "Use 'Export Log as CSV' to save a detailed report.",
                 "Import Complete",
                 MessageBoxButton.OK,
@@ -250,7 +452,7 @@ public partial class MainWindow : Window
         }
         catch (OperationCanceledException)
         {
-            Log("⛔  Import cancelled by user.");
+            Log("⛔  Import cancelled.");
             ImportProgress.Value  = 0;
             TxtProgressLabel.Text = "0%";
         }
@@ -268,12 +470,210 @@ public partial class MainWindow : Window
         }
     }
 
+
+
     // ─── CANCEL ───────────────────────────────────────────────────────────────
 
     private void BtnCancel_Click(object sender, RoutedEventArgs e)
     {
         _cts?.Cancel();
         Log("⛔  Cancellation requested — finishing current row then stopping...");
+    }
+
+    // ─── RECALL ───────────────────────────────────────────────────────────────
+
+    private async void BtnRecall_Click(object sender, RoutedEventArgs e)
+    {
+        if (_previewRows.Count == 0)
+        {
+            MessageBox.Show("Please preview an Excel file first.\nRecall needs a list of ProductCodes to match against.",
+                "No Preview Loaded", MessageBoxButton.OK, MessageBoxImage.Warning);
+            return;
+        }
+
+        var validRows   = _previewRows.Where(r => r.IsValid).ToList();
+        var productCodes = validRows.Select(r => r.ProductCode).Distinct().ToList();
+
+        var confirm = MessageBox.Show(
+            $"⚠️  RECALL — Delete matching DB records\n\n" +
+            $"This will DELETE all records in the following tables\n" +
+            $"where ProductCode matches one of the {productCodes.Count} codes in the current Excel file:\n\n" +
+            $"  • Product\n" +
+            $"  • Stock\n" +
+            $"  • StockTransaction\n" +
+            $"  • Voucher  (via StockTransaction VoucherNumber)\n" +
+            $"  • AccountsTransaction  (via same VoucherNumbers)\n" +
+            $"  • PrintBarCodes\n\n" +
+            $"Lookup tables (Brands, Categories, Groups) are NOT touched.\n\n" +
+            $"This cannot be undone. Continue?",
+            "Confirm Recall",
+            MessageBoxButton.YesNo,
+            MessageBoxImage.Warning);
+
+        if (confirm != MessageBoxResult.Yes) return;
+
+        SetImportingState(true);
+        TxtDeleteStatus.Text      = "Running Recall...";
+        TxtDeleteStatus.Foreground = System.Windows.Media.Brushes.DarkOrange;
+        Log("─────────────────────────────────────────────────");
+        Log($"🗑️  RECALL started — {DateTime.Now:HH:mm:ss}");
+        Log($"    Matching {productCodes.Count} ProductCodes from current Excel file");
+
+        var progress = new Progress<(int Current, int Total, string Message)>(p =>
+        {
+            double pct = p.Total > 0 ? (double)p.Current / p.Total * 100 : 0;
+            ImportProgress.Value  = pct;
+            TxtProgressLabel.Text = $"{pct:F0}%";
+            Log(p.Message);
+            ScrollLog();
+        });
+
+        try
+        {
+            var svc     = new SqlDeleteService(TxtConnectionString.Text.Trim());
+            var summary = await svc.RecallByProductCodesAsync(productCodes, progress);
+
+            ImportProgress.Value  = 100;
+            TxtProgressLabel.Text = "100%";
+
+            string statusText =
+                $"Recall: Products={summary.DeletedProducts}  " +
+                $"Stock={summary.DeletedStockRecords}  " +
+                $"StockTx={summary.DeletedStockTransactions}  " +
+                $"Vouchers={summary.DeletedVouchers}  " +
+                $"AcctTx={summary.DeletedAccountsTransactions}  " +
+                $"Barcodes={summary.DeletedBarcodes}  " +
+                $"({summary.Duration.TotalSeconds:F1}s)";
+
+            TxtDeleteStatus.Text       = statusText;
+            TxtDeleteStatus.Foreground = new System.Windows.Media.SolidColorBrush(
+                System.Windows.Media.Color.FromRgb(21, 128, 61));
+
+            Log("─────────────────────────────────────────────────");
+            Log($"✅  Recall complete — {summary.Duration.TotalSeconds:F1}s");
+            Log($"    Products deleted          : {summary.DeletedProducts}");
+            Log($"    Stock rows deleted        : {summary.DeletedStockRecords}");
+            Log($"    StockTransaction rows     : {summary.DeletedStockTransactions}");
+            Log($"    Voucher rows deleted      : {summary.DeletedVouchers}");
+            Log($"    AccountsTransaction rows  : {summary.DeletedAccountsTransactions}");
+            Log($"    PrintBarCodes rows        : {summary.DeletedBarcodes}");
+            Log("─────────────────────────────────────────────────");
+
+            MessageBox.Show(
+                $"Recall complete!\n\n" +
+                $"Products deleted          : {summary.DeletedProducts}\n" +
+                $"Stock rows deleted        : {summary.DeletedStockRecords}\n" +
+                $"StockTransaction rows     : {summary.DeletedStockTransactions}\n" +
+                $"Voucher rows              : {summary.DeletedVouchers}\n" +
+                $"AccountsTransaction rows  : {summary.DeletedAccountsTransactions}\n" +
+                $"PrintBarCodes rows        : {summary.DeletedBarcodes}\n\n" +
+                $"Duration: {summary.Duration.TotalSeconds:F1}s",
+                "Recall Complete",
+                MessageBoxButton.OK,
+                MessageBoxImage.Information);
+        }
+        catch (Exception ex)
+        {
+            TxtDeleteStatus.Text       = $"Recall FAILED: {ex.Message}";
+            TxtDeleteStatus.Foreground = System.Windows.Media.Brushes.Red;
+            Log($"❌  Recall failed: {ex.Message}");
+            MessageBox.Show($"Recall failed:\n\n{ex.Message}",
+                "Recall Error", MessageBoxButton.OK, MessageBoxImage.Error);
+        }
+        finally
+        {
+            SetImportingState(false);
+        }
+    }
+
+    // ─── DELETE ALL ───────────────────────────────────────────────────────────
+
+    private async void BtnDeleteAll_Click(object sender, RoutedEventArgs e)
+    {
+        // Double confirmation — this is fully destructive
+        var first = MessageBox.Show(
+            "💣  DELETE ALL — FULL TRUNCATE\n\n" +
+            "This will TRUNCATE all 10 tables written by this exporter:\n\n" +
+            "  Product  ·  Stock  ·  StockTransaction\n" +
+            "  Voucher  ·  AccountsTransaction  ·  PrintBarCodes\n" +
+            "  ProductBrands  ·  ProductCategories  ·  ProductGroups\n" +
+            "  BillNumbers\n\n" +
+            "⚠️  ALL rows in these tables will be permanently removed,\n" +
+            "   including data NOT imported by this tool.\n\n" +
+            "Are you absolutely sure?",
+            "⚠️ Confirm Delete All",
+            MessageBoxButton.YesNo,
+            MessageBoxImage.Warning);
+
+        if (first != MessageBoxResult.Yes) return;
+
+        var second = MessageBox.Show(
+            "Last chance.\n\nThis will PERMANENTLY DELETE ALL DATA in those 10 tables.\nThis cannot be undone.\n\nProceed?",
+            "⚠️ Final Confirmation",
+            MessageBoxButton.YesNo,
+            MessageBoxImage.Stop);
+
+        if (second != MessageBoxResult.Yes) return;
+
+        SetImportingState(true);
+        TxtDeleteStatus.Text       = "Running Delete All (Truncate)...";
+        TxtDeleteStatus.Foreground = System.Windows.Media.Brushes.DarkRed;
+        Log("─────────────────────────────────────────────────");
+        Log($"💣  DELETE ALL (TRUNCATE) started — {DateTime.Now:HH:mm:ss}");
+
+        var progress = new Progress<(int Current, int Total, string Message)>(p =>
+        {
+            double pct = p.Total > 0 ? (double)p.Current / p.Total * 100 : 0;
+            ImportProgress.Value  = pct;
+            TxtProgressLabel.Text = $"{pct:F0}%";
+            Log(p.Message);
+            ScrollLog();
+        });
+
+        try
+        {
+            var svc     = new SqlDeleteService(TxtConnectionString.Text.Trim());
+            var summary = await svc.DeleteAllAsync(progress);
+
+            ImportProgress.Value  = 100;
+            TxtProgressLabel.Text = "100%";
+
+            TxtDeleteStatus.Text       = $"Delete All complete — {summary.TruncatedTables.Count} tables truncated  ({summary.Duration.TotalSeconds:F1}s)";
+            TxtDeleteStatus.Foreground = new System.Windows.Media.SolidColorBrush(
+                System.Windows.Media.Color.FromRgb(21, 128, 61));
+
+            Log($"✅  Delete All complete — {summary.Duration.TotalSeconds:F1}s");
+            Log($"    Tables truncated: {string.Join("  ·  ", summary.TruncatedTables)}");
+            Log("─────────────────────────────────────────────────");
+
+            // Reset preview — the DB is now empty so any cached rows are stale
+            _previewRows            = [];
+            PreviewGrid.ItemsSource = null;
+            TxtRowCount.Text        = "0 rows";
+            ResetBadges();
+
+            MessageBox.Show(
+                $"Delete All complete!\n\n" +
+                $"Tables truncated ({summary.TruncatedTables.Count}):\n" +
+                string.Join("\n", summary.TruncatedTables.Select(t => $"  • {t}")) +
+                $"\n\nDuration: {summary.Duration.TotalSeconds:F1}s\n\n" +
+                "The preview grid has been cleared. Re-load your Excel file before importing again.",
+                "Delete All Complete",
+                MessageBoxButton.OK,
+                MessageBoxImage.Information);
+        }
+        catch (Exception ex)
+        {
+            TxtDeleteStatus.Text       = $"Delete All FAILED: {ex.Message}";
+            TxtDeleteStatus.Foreground = System.Windows.Media.Brushes.Red;
+            Log($"❌  Delete All failed: {ex.Message}");
+            MessageBox.Show($"Delete All failed:\n\n{ex.Message}",
+                "Delete All Error", MessageBoxButton.OK, MessageBoxImage.Error);
+        }
+        finally
+        {
+            SetImportingState(false);
+        }
     }
 
     // ─── EXPORT LOG ───────────────────────────────────────────────────────────
@@ -298,7 +698,7 @@ public partial class MainWindow : Window
 
         try
         {
-            // C# 14: collection expression with spread operator
+            // C# 14: collection expression with spread
             List<string> lines =
             [
                 "Row,ProductCode,ProductName,Status,Message",
@@ -309,12 +709,18 @@ public partial class MainWindow : Window
                     $"{r.StatusLabel()}," +
                     $"\"{r.Message}\""),
                 string.Empty,
-                "── Summary ──",
+                "── Summary ──────────────────",
+                $"Voucher Mode,{_lastSummary.VoucherMode}",
                 $"Total Rows,{_lastSummary.TotalRows}",
                 $"New Products,{_lastSummary.NewProducts}",
                 $"Stock Added,{_lastSummary.ExistingProducts}",
                 $"Skipped,{_lastSummary.Skipped}",
                 $"Errors,{_lastSummary.Errors}",
+                $"Barcode Labels Inserted,{(_lastSummary.BarcodesEnabled ? _lastSummary.TotalBarcodesInserted.ToString() : "Disabled")}",
+                ..(  _lastSummary.VoucherMode == VoucherMode.BatchSingle
+                   ? (string[])[$"Batch Voucher No,{_lastSummary.BatchVoucherNo}",
+                                $"Batch Total Value,{_lastSummary.BatchTotalValue:N2}"]
+                   : []),
                 $"Duration (s),{_lastSummary.Duration.TotalSeconds:F1}",
                 $"Import Date,{_lastSummary.StartTime:yyyy-MM-dd HH:mm:ss}"
             ];
@@ -349,16 +755,26 @@ public partial class MainWindow : Window
     private void SetImportingState(bool importing)
     {
         BtnImport.IsEnabled            = !importing;
+        BtnImportSelected.IsEnabled    = !importing && PreviewGrid.SelectedItems.Cast<ExcelProductRow>().Any(r => r.IsValid);
         BtnCancel.IsEnabled            =  importing;
-        BtnBrowse.IsEnabled            = !importing;     // direct x:Name reference — no FindName needed
+        BtnBrowse.IsEnabled            = !importing;
+        RadioPerProduct.IsEnabled      = !importing;
+        RadioBatchSingle.IsEnabled     = !importing;
+        ChkInsertBarcodes.IsEnabled    = !importing;
         TxtConnectionString.IsReadOnly =  importing;
+
+        // Danger Zone
+        BtnDeleteAll.IsEnabled         = !importing;
+        BtnRecall.IsEnabled            = !importing && _previewRows.Count > 0;
     }
 
     private void ResetBadges()
     {
-        TxtNewCount.Text     = "✅ New: 0";
-        TxtStockCount.Text   = "🔄 Stock Added: 0";
-        TxtSkippedCount.Text = "⚠️ Skipped: 0";
-        TxtErrorCount.Text   = "❌ Errors: 0";
+        TxtNewCount.Text             = "✅ New: 0";
+        TxtStockCount.Text           = "🔄 Stock Added: 0";
+        TxtSkippedCount.Text         = "⚠️ Skipped: 0";
+        TxtErrorCount.Text           = "❌ Errors: 0";
+        TxtBarcodeCount.Text         = "🏷️ Labels: 0";
+        BadgeBarcodeCount.Visibility = Visibility.Collapsed;
     }
 }

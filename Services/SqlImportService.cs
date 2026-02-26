@@ -1,19 +1,25 @@
 using Microsoft.Data.SqlClient;
-using ExcelToSqlImporter.Models;
+using Excel2SQLExporter.Models;
 
-namespace ExcelToSqlImporter.Services;
+namespace Excel2SQLExporter.Services;
 
 /// <summary>
 /// Handles all SQL Server import operations for SimplePOSDB.
-/// Per Excel row, writes to 9 tables in a single atomic transaction.
 ///
-/// C# 14: Primary constructor — connectionString injected directly.
+/// C# 14: Primary constructor.
+///
+/// VoucherMode.PerProduct  — each row gets its own JUR number.
+///                           Voucher + AccountsTransaction written inside the per-row transaction.
+///
+/// VoucherMode.BatchSingle — one JUR number for the whole import.
+///                           BillNumbers incremented ONCE before the loop.
+///                           Per-row transactions cover Product / Stock / StockTransaction only.
+///                           ONE Voucher + 2 AccountsTransaction rows written in a final transaction.
 /// </summary>
 public class SqlImportService(string connectionString)
 {
-    // ── Fixed account codes for Opening Stock Balance journal entries ─────────
-    private const string DebitAccountCode  = "141";  // Stock (Asset — increases on debit)
-    private const string CreditAccountCode = "92";   // Opening Balance Equity (increases on credit)
+    private const string DebitAccountCode   = "141";                 // Stock (Asset)
+    private const string CreditAccountCode  = "92";                  // Opening Balance Equity
     private const string JournalVoucherType = "Opening Stock Balance";
     private const string AccountTxType      = "Opening Stock Balance";
     private const string ImportUserId       = "IMPORT";
@@ -31,9 +37,8 @@ public class SqlImportService(string connectionString)
                 "SELECT COUNT(*) FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_NAME = 'Product'",
                 conn);
 
-            int tableCount = (int)(await cmd.ExecuteScalarAsync())!;
-
-            return tableCount == 0
+            int count = (int)(await cmd.ExecuteScalarAsync())!;
+            return count == 0
                 ? (false, "Connected, but 'Product' table not found. Is this SimplePOSDB?")
                 : (true,  $"✅ Connected → {conn.Database}  on  {conn.DataSource}");
         }
@@ -47,23 +52,63 @@ public class SqlImportService(string connectionString)
 
     public async Task<ImportSummary> ImportAsync(
         List<ExcelProductRow>                               rows,
+        VoucherMode                                         voucherMode,
+        bool                                                insertBarcodes,
         IProgress<(int Current, int Total, string Message)> progress,
         CancellationToken cancellationToken = default)
     {
         var summary = new ImportSummary
         {
-            TotalRows = rows.Count,
-            StartTime = DateTime.Now
+            TotalRows       = rows.Count,
+            StartTime       = DateTime.Now,
+            VoucherMode     = voucherMode,
+            BarcodesEnabled = insertBarcodes
         };
 
         await using var conn = new SqlConnection(connectionString);
         await conn.OpenAsync(cancellationToken);
 
-        // Pre-load lookup caches — avoids repeated round-trips for every row
         var brandCache    = await LoadLookupAsync(conn, "ProductBrands",     "BrandId",    "BrandName");
         var categoryCache = await LoadLookupAsync(conn, "ProductCategories", "CategoryId", "CategoryName");
         var groupCache    = await LoadLookupAsync(conn, "ProductGroups",     "GroupId",    "GroupName");
 
+        // Load the price cipher key from RegisteredUser.CostCode once — used by all barcode rows.
+        // Falls back to null if the table is empty or the column is blank; barcodes will
+        // then write NULL to PrintBarCodes.CostCode rather than failing the import.
+        string? priceKey = insertBarcodes
+            ? await LoadPriceKeyAsync(conn)
+            : null;
+
+        // ── Batch mode pre-step: reserve ONE voucher number ───────────────────
+        string? batchVoucherNo   = null;
+        decimal batchTotalValue  = 0m;
+        int     batchValidCount  = 0;
+
+        if (voucherMode == VoucherMode.BatchSingle)
+        {
+            progress.Report((0, rows.Count, "📋  Batch mode — reserving a single Journal Voucher number..."));
+            await using var preTx = conn.BeginTransaction();
+            try
+            {
+                batchVoucherNo = await GetNextJournalVoucherAsync(conn, preTx);
+                await preTx.CommitAsync(cancellationToken);
+                progress.Report((0, rows.Count, $"📋  Batch voucher reserved: {batchVoucherNo}"));
+            }
+            catch
+            {
+                await preTx.RollbackAsync(cancellationToken);
+                throw;
+            }
+
+            // Pre-calculate total batch value and count from valid rows
+            batchTotalValue = rows.Where(r => r.IsValid).Sum(r => r.TotalValue);
+            batchValidCount = rows.Count(r => r.IsValid);
+
+            summary.BatchVoucherNo  = batchVoucherNo;
+            summary.BatchTotalValue = batchTotalValue;
+        }
+
+        // ── Per-row loop ──────────────────────────────────────────────────────
         int current = 0;
 
         foreach (var row in rows)
@@ -73,7 +118,6 @@ public class SqlImportService(string connectionString)
             progress.Report((current, rows.Count,
                 $"Processing {current}/{rows.Count}: {row.ProductCode} — {row.ProductName}"));
 
-            // ── Skip invalid rows without touching the DB ─────────────────────
             if (!row.IsValid)
             {
                 summary.Skipped++;
@@ -88,57 +132,55 @@ public class SqlImportService(string connectionString)
                 continue;
             }
 
-            // ── Each row is its own transaction ───────────────────────────────
-            // One failure rolls back only that row — others are unaffected.
             await using var tx = conn.BeginTransaction();
             try
             {
-                // Step 1 — ProductBrands
                 int brandId = await GetOrInsertLookupAsync(conn, tx, brandCache,
                     "ProductBrands", "BrandId", "BrandName", row.ProductBrand);
 
-                // Step 2 — ProductCategories
                 int categoryId = await GetOrInsertLookupAsync(conn, tx, categoryCache,
                     "ProductCategories", "CategoryId", "CategoryName", row.Category);
 
-                // Step 3 — ProductGroups  (default: "General")
                 int groupId = await GetOrInsertLookupAsync(conn, tx, groupCache,
                     "ProductGroups", "GroupId", "GroupName", row.Group);
 
-                // Step 4 — Product  (insert only if ProductCode not found)
                 bool productExists = await ProductExistsAsync(conn, tx, row.ProductCode);
                 if (!productExists)
                     await InsertProductAsync(conn, tx, row, brandId, categoryId, groupId);
 
-                // Step 5 — Stock  (always — includes ProductSize)
                 int stockId = await InsertStockAsync(conn, tx, row);
 
-                // Step 6 — BillNumbers  (read → increment JournalVoucherNo → update)
-                string voucherNumber = await GetNextJournalVoucherAsync(conn, tx);
+                // ── Voucher number depends on mode ────────────────────────────
+                string voucherNumber;
 
-                // Step 7 — StockTransaction  (uses the real voucher number from step 6)
-                await InsertStockTransactionAsync(conn, tx, row, stockId, voucherNumber);
+                if (voucherMode == VoucherMode.PerProduct)
+                {
+                    voucherNumber = await GetNextJournalVoucherAsync(conn, tx);
+                    await InsertStockTransactionAsync(conn, tx, row, stockId, voucherNumber);
+                    string narration = $"Stock Opening Balance - Product Code: {row.ProductCode}";
+                    await InsertVoucherAsync(conn, tx, voucherNumber, row.TotalValue, narration);
+                    await InsertAccountsTransactionAsync(conn, tx, voucherNumber, row.TotalValue, narration);
+                }
+                else
+                {
+                    voucherNumber = batchVoucherNo!;
+                    await InsertStockTransactionAsync(conn, tx, row, stockId, voucherNumber);
+                }
 
-                // Step 8 — Voucher  (Opening Stock Balance, Debit 141, Credit 92)
-                decimal amount    = row.TotalValue;  // Qty × CostPrice
-                string  narration = $"Stock Opening Balance - Product Code: {row.ProductCode}";
-                await InsertVoucherAsync(conn, tx, voucherNumber, amount, narration);
-
-                // Step 9 — AccountsTransaction  (double-entry: 2 rows)
-                await InsertAccountsTransactionAsync(conn, tx, voucherNumber, amount, narration);
+                // ── Barcodes: insert (int)Quantity rows into PrintBarCodes ────
+                int barcodesWritten = 0;
+                if (insertBarcodes)
+                {
+                    barcodesWritten = await InsertBarcodesAsync(conn, tx, row, priceKey);
+                    summary.TotalBarcodesInserted += barcodesWritten;
+                }
 
                 await tx.CommitAsync(cancellationToken);
 
-                // ── Build result message ──────────────────────────────────────
-                string sizeNote = string.IsNullOrWhiteSpace(row.ProductSize)
-                    ? string.Empty
-                    : $" | Size: {row.ProductSize}";
-
-                string truncNote = row.ProductName.Length > 40
-                    ? " | Name truncated"
-                    : string.Empty;
-
-                var status = productExists ? ImportStatus.ExistingProduct : ImportStatus.NewProduct;
+                string sizeNote    = string.IsNullOrWhiteSpace(row.ProductSize) ? string.Empty : $" | Size: {row.ProductSize}";
+                string truncNote   = row.ProductName.Length > 40 ? " | Name truncated" : string.Empty;
+                string barcodeNote = insertBarcodes ? $" | Barcodes: {barcodesWritten}" : string.Empty;
+                var    status      = productExists ? ImportStatus.ExistingProduct : ImportStatus.NewProduct;
 
                 summary.Results.Add(new ImportResult
                 {
@@ -147,8 +189,8 @@ public class SqlImportService(string connectionString)
                     ProductName = row.ProductName,
                     Status      = status,
                     Message     = productExists
-                        ? $"Stock added — {voucherNumber}{sizeNote}{truncNote}"
-                        : $"New product + stock — {voucherNumber}{sizeNote}{truncNote}"
+                        ? $"Stock added — {voucherNumber}{sizeNote}{truncNote}{barcodeNote}"
+                        : $"New product + stock — {voucherNumber}{sizeNote}{truncNote}{barcodeNote}"
                 });
 
                 if (productExists) summary.ExistingProducts++;
@@ -169,12 +211,41 @@ public class SqlImportService(string connectionString)
             }
         }
 
+        // ── Batch mode post-step: write ONE Voucher + 2 AccountsTransaction ───
+        if (voucherMode == VoucherMode.BatchSingle && batchVoucherNo is not null)
+        {
+            int  successCount = summary.NewProducts + summary.ExistingProducts;
+            string batchNarration =
+                $"Stock Opening Balance - Batch Import {DateTime.Today:dd/MM/yyyy} ({successCount} products)";
+
+            progress.Report((rows.Count, rows.Count,
+                $"📒  Writing batch Voucher {batchVoucherNo}  (total: {batchTotalValue:N2}, {successCount} products)..."));
+
+            await using var postTx = conn.BeginTransaction();
+            try
+            {
+                await InsertVoucherAsync(postTx.Connection!, postTx,
+                    batchVoucherNo, batchTotalValue, batchNarration);
+                await InsertAccountsTransactionAsync(postTx.Connection!, postTx,
+                    batchVoucherNo, batchTotalValue, batchNarration);
+                await postTx.CommitAsync(cancellationToken);
+
+                progress.Report((rows.Count, rows.Count,
+                    $"✅  Batch Voucher {batchVoucherNo} committed — Debit 141 / Credit 92 for {batchTotalValue:N2}"));
+            }
+            catch (Exception ex)
+            {
+                await postTx.RollbackAsync(cancellationToken);
+                progress.Report((rows.Count, rows.Count,
+                    $"❌  Batch Voucher write failed: {ex.Message}"));
+            }
+        }
+
         summary.EndTime = DateTime.Now;
         return summary;
     }
 
-    // ─── Step 6: BillNumbers ─────────────────────────────────────────────────
-    // Reads JournalVoucherNo → increments → updates → returns "JUR0000001"
+    // ─── BillNumbers: read → increment JournalVoucherNo → update → return "JUR0000001" ──
 
     private static async Task<string> GetNextJournalVoucherAsync(
         SqlConnection conn, SqlTransaction tx)
@@ -187,7 +258,6 @@ public class SqlImportService(string connectionString)
 
         if (!hasRow)
         {
-            // First ever use — create the counter row, all values 0 except JournalVoucherNo = 1
             const string insertSql = """
                 INSERT INTO [dbo].[BillNumbers]
                     ([SalesBillNo],[SalesOrderBillNo],[SalesHoldNo],[SalesReturnNo],
@@ -213,10 +283,10 @@ public class SqlImportService(string connectionString)
             await updateCmd.ExecuteNonQueryAsync();
         }
 
-        return $"JUR{nextNo:D7}";   // → JUR0000001 … JUR9999999
+        return $"JUR{nextNo:D7}";
     }
 
-    // ─── Step 8: Voucher ──────────────────────────────────────────────────────
+    // ─── Voucher ──────────────────────────────────────────────────────────────
 
     private static async Task InsertVoucherAsync(
         SqlConnection conn, SqlTransaction tx,
@@ -237,14 +307,14 @@ public class SqlImportService(string connectionString)
         cmd.Parameters.AddWithValue("@VoucherNumber", voucherNumber);
         cmd.Parameters.AddWithValue("@VoucherDate",   DateOnly.FromDateTime(DateTime.Today));
         cmd.Parameters.AddWithValue("@VoucherType",   JournalVoucherType);
-        cmd.Parameters.AddWithValue("@DebitAccount",  DebitAccountCode);    // 141
-        cmd.Parameters.AddWithValue("@CreditAccount", CreditAccountCode);   // 92
+        cmd.Parameters.AddWithValue("@DebitAccount",  DebitAccountCode);
+        cmd.Parameters.AddWithValue("@CreditAccount", CreditAccountCode);
         cmd.Parameters.AddWithValue("@Amount",        amount);
         cmd.Parameters.AddWithValue("@Narration",     narration);
         await cmd.ExecuteNonQueryAsync();
     }
 
-    // ─── Step 9: AccountsTransaction — DEBIT + CREDIT rows ───────────────────
+    // ─── AccountsTransaction — DEBIT + CREDIT ────────────────────────────────
 
     private static async Task InsertAccountsTransactionAsync(
         SqlConnection conn, SqlTransaction tx,
@@ -261,7 +331,7 @@ public class SqlImportService(string connectionString)
                  @TxType, @VoucherNumber, @Narration, @UserID)
             """;
 
-        // Row 1 — DEBIT 141 (Stock): inventory asset increases
+        // DEBIT 141 — Stock: inventory asset increases
         await using var debitCmd = new SqlCommand(sql, conn, tx);
         debitCmd.Parameters.AddWithValue("@Date",          DateOnly.FromDateTime(DateTime.Today));
         debitCmd.Parameters.AddWithValue("@AccountCode",   DebitAccountCode);
@@ -273,7 +343,7 @@ public class SqlImportService(string connectionString)
         debitCmd.Parameters.AddWithValue("@UserID",        ImportUserId);
         await debitCmd.ExecuteNonQueryAsync();
 
-        // Row 2 — CREDIT 92 (Opening Balance Equity): equity increases
+        // CREDIT 92 — Opening Balance Equity: equity increases
         await using var creditCmd = new SqlCommand(sql, conn, tx);
         creditCmd.Parameters.AddWithValue("@Date",          DateOnly.FromDateTime(DateTime.Today));
         creditCmd.Parameters.AddWithValue("@AccountCode",   CreditAccountCode);
@@ -288,15 +358,26 @@ public class SqlImportService(string connectionString)
 
     // ─── Lookup helpers ───────────────────────────────────────────────────────
 
+    /// <summary>
+    /// Reads CostCode from RegisteredUser (the price cipher key, e.g. "HOLYQURANF").
+    /// Returns null if the table is empty or CostCode is blank — callers handle null gracefully.
+    /// </summary>
+    private static async Task<string?> LoadPriceKeyAsync(SqlConnection conn)
+    {
+        await using var cmd = new SqlCommand(
+            "SELECT TOP 1 [CostCode] FROM [dbo].[RegisteredUser] WHERE [CostCode] IS NOT NULL AND LEN([CostCode]) >= 10",
+            conn);
+        var result = await cmd.ExecuteScalarAsync();
+        return result is string s && s.Length >= 10 ? s : null;
+    }
+
     private static async Task<Dictionary<string, int>> LoadLookupAsync(
         SqlConnection conn, string table, string idCol, string nameCol)
     {
         Dictionary<string, int> dict = new(StringComparer.OrdinalIgnoreCase);
-
         await using var cmd = new SqlCommand(
             $"SELECT [{idCol}], [{nameCol}] FROM [dbo].[{table}]", conn);
         await using var reader = await cmd.ExecuteReaderAsync();
-
         while (await reader.ReadAsync())
         {
             string name = reader[nameCol]?.ToString() ?? string.Empty;
@@ -304,7 +385,6 @@ public class SqlImportService(string connectionString)
             if (!string.IsNullOrWhiteSpace(name))
                 dict.TryAdd(name, id);
         }
-
         return dict;
     }
 
@@ -345,18 +425,24 @@ public class SqlImportService(string connectionString)
     {
         const string sql = """
             INSERT INTO [dbo].[Product]
-                ([ProductCode], [CategoryId], [ProductName], [SalesPrice],
+                ([ProductCode], [BarCode], [CategoryId], [ProductName], [SalesPrice],
                  [SalesDiscount], [MinimumReorderQty], [ReorderLevel],
                  [GroupId], [BrandId], [IsActiveProduct])
             VALUES
-                (@ProductCode, @CategoryId, @ProductName, @SalesPrice,
+                (@ProductCode, @BarCode, @CategoryId, @ProductName, @SalesPrice,
                  0, 0, 0, @GroupId, @BrandId, 1)
             """;
 
+        // BarCode column is nvarchar(13) — use first 13 chars of ProductCode
+        string barCode = row.ProductCode.Length > 13
+            ? row.ProductCode[..13]
+            : row.ProductCode;
+
         await using var cmd = new SqlCommand(sql, conn, tx);
         cmd.Parameters.AddWithValue("@ProductCode", row.ProductCode);
+        cmd.Parameters.AddWithValue("@BarCode",     barCode);
         cmd.Parameters.AddWithValue("@CategoryId",  categoryId);
-        cmd.Parameters.AddWithValue("@ProductName", row.ProductNameDb);   // already ≤40 chars
+        cmd.Parameters.AddWithValue("@ProductName", row.ProductNameDb);
         cmd.Parameters.AddWithValue("@SalesPrice",  row.SellingPrice);
         cmd.Parameters.AddWithValue("@GroupId",     groupId);
         cmd.Parameters.AddWithValue("@BrandId",     brandId);
@@ -382,13 +468,10 @@ public class SqlImportService(string connectionString)
         cmd.Parameters.AddWithValue("@ProductCost",  row.CostPrice);
         cmd.Parameters.AddWithValue("@ProductPrice", row.SellingPrice);
         cmd.Parameters.AddWithValue("@StockDate",    DateOnly.FromDateTime(DateTime.Today));
-
-        // ProductSize — NULL in DB if not found in product name
         cmd.Parameters.AddWithValue("@ProductSize",
             string.IsNullOrWhiteSpace(row.ProductSize)
                 ? (object)DBNull.Value
                 : row.ProductSize);
-
         return (int)(await cmd.ExecuteScalarAsync())!;
     }
 
@@ -421,5 +504,70 @@ public class SqlImportService(string connectionString)
             $"Stock Opening Balance - Product Code: {row.ProductCode}");
         cmd.Parameters.AddWithValue("@UserID", ImportUserId);
         await cmd.ExecuteNonQueryAsync();
+    }
+
+    // ─── PrintBarCodes: insert one row per unit of stock ─────────────────────
+    // If Qty = 4, this inserts 4 rows — one per physical label to be printed.
+    //
+    // Column constraints (from schema):
+    //   BarCodeString  nvarchar(13)  — ProductCode truncated to 13
+    //   Description    nvarchar(20)  — ProductNameDb truncated to 20
+    //   Price          nvarchar(12)  — SellingPrice as "F2" string
+    //   CostCode       nvarchar(10)  — encoded via PriceCodeConverter (RegisteredUser.CostCode)
+    //                                  NULL if priceKey not found or shorter than 10 chars
+    //   ProductSize    nvarchar(10)  — extracted size, NULL if empty
+    //   ProductColor   nvarchar(10)  — NULL
+    //   Remarks        nvarchar(10)  — NULL
+    //   Remarks1       nvarchar(10)  — NULL
+
+    private static async Task<int> InsertBarcodesAsync(
+        SqlConnection conn, SqlTransaction tx,
+        ExcelProductRow row, string? priceKey)
+    {
+        const string sql = """
+            INSERT INTO [dbo].[PrintBarCodes]
+                ([BarCodeString], [Description], [Price],
+                 [CostCode], [ProductSize], [ProductColor],
+                 [Remarks], [Remarks1])
+            VALUES
+                (@BarCodeString, @Description, @Price,
+                 @CostCode, @ProductSize, NULL,
+                 NULL, NULL)
+            """;
+
+        // Enforce nvarchar length limits from schema
+        string barCodeStr  = row.ProductCode.Length  > 13 ? row.ProductCode[..13]   : row.ProductCode;
+        string description = row.ProductNameDb.Length > 20 ? row.ProductNameDb[..20] : row.ProductNameDb;
+        string price       = row.SellingPrice.ToString("F2");
+        if (price.Length > 12) price = price[..12];
+
+        string? productSize = string.IsNullOrWhiteSpace(row.ProductSize) ? null
+            : row.ProductSize.Length > 10 ? row.ProductSize[..10]
+            : row.ProductSize;
+
+        // Compute CostCode: encode the price using the cipher key from RegisteredUser.CostCode.
+        // priceKey is null when the table is empty or the column is blank → CostCode stays NULL.
+        string? costCode = null;
+        if (priceKey is not null)
+        {
+            string raw = PriceCodeConverter.ConvertToCostCode(price, priceKey);
+            costCode   = raw.Length > 10 ? raw[..10] : raw;   // nvarchar(10) limit
+        }
+
+        // One row per unit of stock — Qty 4 → 4 label rows
+        int count = (int)Math.Max(1, Math.Floor(row.Quantity));
+
+        for (int i = 0; i < count; i++)
+        {
+            await using var cmd = new SqlCommand(sql, conn, tx);
+            cmd.Parameters.AddWithValue("@BarCodeString", barCodeStr);
+            cmd.Parameters.AddWithValue("@Description",   description);
+            cmd.Parameters.AddWithValue("@Price",         price);
+            cmd.Parameters.AddWithValue("@CostCode",      costCode    is null ? (object)DBNull.Value : costCode);
+            cmd.Parameters.AddWithValue("@ProductSize",   productSize is null ? (object)DBNull.Value : productSize);
+            await cmd.ExecuteNonQueryAsync();
+        }
+
+        return count;
     }
 }

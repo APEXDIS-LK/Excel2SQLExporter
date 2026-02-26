@@ -1,16 +1,14 @@
-namespace ExcelToSqlImporter.Models;
+namespace Excel2SQLExporter.Models;
 
 /// <summary>
-/// Represents one row read from the Excel file.
-/// C# 14: uses the 'field' keyword in semi-auto properties to
-/// enforce business rules (trim, truncate, default) on set
+/// One row read from the Excel file.
+/// C# 14: 'field' keyword enforces trim / truncate / default rules on set
 /// without declaring separate private backing fields.
 /// </summary>
 public class ExcelProductRow
 {
     public int RowNumber { get; set; }
 
-    // C# 14 'field' keyword — auto-trim on every set
     public string ProductCode
     {
         get;
@@ -23,15 +21,14 @@ public class ExcelProductRow
         set => field = value.Trim();
     } = string.Empty;
 
-    /// Full original name as read from Excel — shown in the preview grid
+    /// Full original name as read from Excel — shown in preview grid
     public string ProductName
     {
         get;
         set => field = value.Trim();
     } = string.Empty;
 
-    /// Truncated to 40 chars — the value written to Product.ProductName in SQL
-    /// C# 14 'field': truncation rule enforced inline, no separate backing field
+    /// Truncated to 40 chars — written to Product.ProductName in SQL
     public string ProductNameDb
     {
         get;
@@ -65,6 +62,6 @@ public class ExcelProductRow
     public bool   IsValid           { get; set; } = true;
     public string ValidationMessage { get; set; } = string.Empty;
 
-    /// Computed — Qty × CostPrice; used for Voucher and AccountsTransaction amounts
+    /// Qty × CostPrice — used for Voucher and AccountsTransaction amounts
     public decimal TotalValue => Quantity * CostPrice;
 }

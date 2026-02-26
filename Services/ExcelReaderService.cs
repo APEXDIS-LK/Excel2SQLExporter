@@ -1,19 +1,13 @@
 using ClosedXML.Excel;
-using ExcelToSqlImporter.Models;
+using Excel2SQLExporter.Models;
 
-namespace ExcelToSqlImporter.Services;
+namespace Excel2SQLExporter.Services;
 
-/// <summary>
-/// Reads .xlsx / .xlsm files and maps rows to ExcelProductRow objects.
-/// Handles flexible column header matching, ProductSize extraction,
-/// and row-level validation.
-/// </summary>
 public class ExcelReaderService
 {
-    // Flexible column header matching — case-insensitive
     private static readonly Dictionary<string, string[]> ColumnAliases = new()
     {
-        ["ProductCode"]  = ["product code", "productcode", "code", "sku", "item code", "barcode"],
+        ["ProductCode"]  = ["product code", "productcode", "code", "sku", "item code"],
         ["ProductBrand"] = ["product brand", "brand", "brand name"],
         ["ProductName"]  = ["product name", "productname", "name", "description", "item name"],
         ["Category"]     = ["category", "cat", "product category", "item category"],
@@ -23,7 +17,6 @@ public class ExcelReaderService
         ["SellingPrice"] = ["selling price", "price", "sales price", "retail price", "jdm selling price"]
     };
 
-    // All size values this tool recognises after a '-' in product names
     private static readonly HashSet<string> KnownSizes = new(StringComparer.OrdinalIgnoreCase)
     {
         "XS","S","M","L","XL","XXL","XXXL",
@@ -34,7 +27,6 @@ public class ExcelReaderService
 
     public (List<ExcelProductRow> Rows, List<string> Warnings) ReadExcel(string filePath)
     {
-        // C# 14: collection expression initialisers
         List<ExcelProductRow> rows     = [];
         List<string>          warnings = [];
 
@@ -48,7 +40,6 @@ public class ExcelReaderService
 
         var columnMap = MapColumns(worksheet, headerRow, warnings);
 
-        // Validate required columns exist
         foreach (var req in (string[])["ProductCode", "ProductName", "SellingPrice"])
         {
             if (!columnMap.ContainsKey(req))
@@ -72,11 +63,11 @@ public class ExcelReaderService
                 RowNumber     = r,
                 ProductCode   = productCode,
                 ProductBrand  = GetCell(worksheet, r, columnMap, "ProductBrand").IfEmpty("General"),
-                ProductName   = rawName,       // original — shown in preview
-                ProductNameDb = cleanName,     // field keyword setter auto-truncates to 40 chars
-                ProductSize   = productSize,   // field keyword setter auto-uppercases
+                ProductName   = rawName,
+                ProductNameDb = cleanName,
+                ProductSize   = productSize,
                 Category      = GetCell(worksheet, r, columnMap, "Category").IfEmpty("General"),
-                Group         = GetCell(worksheet, r, columnMap, "Group"),  // setter defaults to "General"
+                Group         = GetCell(worksheet, r, columnMap, "Group"),
                 Quantity      = GetCell(worksheet, r, columnMap, "Quantity").ToDecimalSafe(),
                 CostPrice     = GetCell(worksheet, r, columnMap, "CostPrice").ToDecimalSafe(),
                 SellingPrice  = GetCell(worksheet, r, columnMap, "SellingPrice").ToDecimalSafe()
@@ -90,14 +81,6 @@ public class ExcelReaderService
     }
 
     // ─── Size extraction ──────────────────────────────────────────────────────
-    // Splits on the last '-' and checks if the suffix is a known clothing or
-    // numeric waist/chest size.
-    //
-    // Examples:
-    //   "POLO BIG SIZE - XXL"       → ("POLO BIG SIZE - XXL", "XXL")
-    //   "POLO STRIPES - M"          → ("POLO STRIPES - M",    "M")
-    //   "KODRO BAGGY DENIM BK- 36"  → ("KODRO BAGGY DENIM BK- 36", "36")
-    //   "POLO SHIRT"                → ("POLO SHIRT",           "")
 
     private static (string Name, string Size) ExtractSize(string rawName)
     {
@@ -111,14 +94,11 @@ public class ExcelReaderService
         if (KnownSizes.Contains(suffix))
             return (rawName, suffix.ToUpperInvariant());
 
-        // Numeric sizes in range 20–60 not already in KnownSizes
         if (int.TryParse(suffix, out int n) && n is >= 20 and <= 60)
             return (rawName, suffix);
 
         return (rawName, string.Empty);
     }
-
-    // ─── Header row detection ─────────────────────────────────────────────────
 
     private static int FindHeaderRow(IXLWorksheet ws)
     {
@@ -135,8 +115,6 @@ public class ExcelReaderService
         }
         return -1;
     }
-
-    // ─── Column mapping ───────────────────────────────────────────────────────
 
     private static Dictionary<string, int> MapColumns(
         IXLWorksheet ws, int headerRow, List<string> warnings)
@@ -168,8 +146,6 @@ public class ExcelReaderService
             ? ws.Cell(row, col).GetString().Trim()
             : string.Empty;
 
-    // ─── Validation ───────────────────────────────────────────────────────────
-
     private static void ValidateRow(ExcelProductRow row)
     {
         List<string> errors = [];
@@ -190,21 +166,18 @@ public class ExcelReaderService
         }
         else if (row.ProductName.Length > 40)
         {
-            // Truncation is a warning — row is still valid, DB name is already truncated
-            row.ValidationMessage = $"Name truncated to 40 chars for DB (was {row.ProductName.Length})";
+            row.ValidationMessage = $"Name truncated to 40 chars (was {row.ProductName.Length})";
         }
     }
 }
 
-// ─── String helpers (static extension methods — safe in all C# versions) ─────
+// ─── String helpers ───────────────────────────────────────────────────────────
 
 public static class StringExtensions
 {
-    /// Returns <paramref name="fallback"/> when the string is null/empty/whitespace.
     public static string IfEmpty(this string value, string fallback)
         => string.IsNullOrWhiteSpace(value) ? fallback : value;
 
-    /// Parses to decimal, strips commas; returns 0 on failure.
     public static decimal ToDecimalSafe(this string value)
     {
         string clean = value.Replace(",", "").Trim();

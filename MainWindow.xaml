@@ -1,10 +1,10 @@
-<Window x:Class="ExcelToSqlImporter.MainWindow"
+<Window x:Class="Excel2SQLExporter.MainWindow"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        xmlns:local="clr-namespace:ExcelToSqlImporter"
-        Title="SimplePOS Data Exporter - Export Data from Excel → SQL Server · Opening Stock"
-        Height="820" Width="1100"
-        MinHeight="720" MinWidth="960"
+        xmlns:local="clr-namespace:Excel2SQLExporter"
+        Title="Excel 2 SQL Exporter  ·  SimplePOSDB  ·  Opening Stock"
+        Height="1020" Width="1120"
+        MinHeight="900" MinWidth="980"
         WindowStartupLocation="CenterScreen"
         Background="#F8FAFC"
         FontFamily="Segoe UI">
@@ -16,49 +16,51 @@
 
     <Grid Margin="24">
         <Grid.RowDefinitions>
-            <RowDefinition Height="Auto"/>   <!-- Header -->
-            <RowDefinition Height="Auto"/>   <!-- Connection -->
-            <RowDefinition Height="Auto"/>   <!-- File picker -->
-            <RowDefinition Height="*"/>      <!-- Preview grid -->
-            <RowDefinition Height="Auto"/>   <!-- Progress / actions -->
-            <RowDefinition Height="190"/>    <!-- Import log -->
+            <RowDefinition Height="Auto"/>   <!-- Header          -->
+            <RowDefinition Height="Auto"/>   <!-- Connection      -->
+            <RowDefinition Height="Auto"/>   <!-- File picker     -->
+            <RowDefinition Height="Auto"/>   <!-- Import Options  -->
+            <RowDefinition Height="*"/>      <!-- Preview grid    -->
+            <RowDefinition Height="Auto"/>   <!-- Progress/actions-->
+            <RowDefinition Height="Auto"/>   <!-- Danger Zone     -->
+            <RowDefinition Height="190"/>    <!-- Import log      -->
         </Grid.RowDefinitions>
 
         <!-- ═══ HEADER ══════════════════════════════════════════════════════ -->
-        <StackPanel Grid.Row="0" Margin="0,0,0,20">
-            <TextBlock Text="Simple POS Data Exporter - Export Data from Excel → SQL Server"
+        <StackPanel Grid.Row="0" Margin="0,0,0,18">
+            <TextBlock Text="Excel 2 SQL Exporter"
                        FontSize="22" FontWeight="Bold" Foreground="#1E293B"/>
             <TextBlock FontSize="13" Foreground="#64748B" Margin="0,3,0,0">
-                <Run Text="SimplePOS Database  ·  Opening Stock Entry  ·  9 tables per row" FontWeight="SemiBold" Foreground="#2563EB"/>
+                <Run Text="SimplePOSDB  ·  Opening Stock Entry  ·  9 tables per row"/>
             </TextBlock>
         </StackPanel>
 
         <!-- ═══ CONNECTION ══════════════════════════════════════════════════ -->
-        <Border Grid.Row="1" Style="{StaticResource Card}" Margin="0,0,0,14">
+        <Border Grid.Row="1" Style="{StaticResource Card}" Margin="0,0,0,12">
             <Grid>
                 <Grid.ColumnDefinitions>
                     <ColumnDefinition Width="Auto"/>
                     <ColumnDefinition Width="*"/>
                     <ColumnDefinition Width="Auto"/>
-                    <ColumnDefinition Width="200"/>
+                    <ColumnDefinition Width="210"/>
                 </Grid.ColumnDefinitions>
 
                 <TextBlock Grid.Column="0" Text="🔗  Connection String"
                            FontWeight="SemiBold" Foreground="#334155"
                            VerticalAlignment="Center" Margin="0,0,14,0"/>
 
-                <TextBox   Grid.Column="1"
-                           x:Name="TxtConnectionString"
-                           Style="{StaticResource ModernTextBox}"
-                           Text="Server=.\SQLEXPRESS;Database=SimplePOSDB;Trusted_Connection=True;TrustServerCertificate=True;"
-                           ToolTip="Paste your SQL Server Express connection string"
-                           Margin="0,0,10,0"/>
+                <TextBox Grid.Column="1"
+                         x:Name="TxtConnectionString"
+                         Style="{StaticResource ModernTextBox}"
+                         Text="Server=.\SQLEXPRESS;Database=SimplePOSDB;Trusted_Connection=True;TrustServerCertificate=True;"
+                         ToolTip="Paste your SQL Server connection string"
+                         Margin="0,0,10,0"/>
 
-                <Button    Grid.Column="2"
-                           Style="{StaticResource SecondaryButton}"
-                           Content="🔌  Test Connection"
-                           Click="BtnTestConnection_Click"
-                           Margin="0,0,10,0"/>
+                <Button Grid.Column="2"
+                        Style="{StaticResource SecondaryButton}"
+                        Content="🔌  Test Connection"
+                        Click="BtnTestConnection_Click"
+                        Margin="0,0,10,0"/>
 
                 <TextBlock Grid.Column="3"
                            x:Name="TxtConnectionStatus"
@@ -69,7 +71,7 @@
         </Border>
 
         <!-- ═══ FILE PICKER ═════════════════════════════════════════════════ -->
-        <Border Grid.Row="2" Style="{StaticResource Card}" Margin="0,0,0,14">
+        <Border Grid.Row="2" Style="{StaticResource Card}" Margin="0,0,0,12">
             <Grid>
                 <Grid.ColumnDefinitions>
                     <ColumnDefinition Width="Auto"/>
@@ -82,38 +84,148 @@
                            FontWeight="SemiBold" Foreground="#334155"
                            VerticalAlignment="Center" Margin="0,0,14,0"/>
 
-                <TextBox   Grid.Column="1"
-                           x:Name="TxtFilePath"
-                           Style="{StaticResource ModernTextBox}"
-                           IsReadOnly="True"
-                           Foreground="#64748B"
-                           Text="No file selected..."
-                           Margin="0,0,10,0"/>
+                <TextBox Grid.Column="1"
+                         x:Name="TxtFilePath"
+                         Style="{StaticResource ModernTextBox}"
+                         IsReadOnly="True"
+                         Foreground="#64748B"
+                         Text="No file selected..."
+                         Margin="0,0,10,0"/>
 
-                <!-- x:Name="BtnBrowse" — must match FindName("BtnBrowse") in code-behind -->
-                <Button    Grid.Column="2"
-                           x:Name="BtnBrowse"
-                           Style="{StaticResource SecondaryButton}"
-                           Content="Browse..."
-                           Click="BtnBrowse_Click"
-                           Margin="0,0,10,0"/>
+                <Button Grid.Column="2"
+                        x:Name="BtnBrowse"
+                        Style="{StaticResource SecondaryButton}"
+                        Content="Browse..."
+                        Click="BtnBrowse_Click"
+                        Margin="0,0,10,0"/>
 
-                <Button    Grid.Column="3"
-                           Style="{StaticResource PrimaryButton}"
-                           Content="📋  Preview Data"
-                           Click="BtnPreview_Click"/>
+                <Button Grid.Column="3"
+                        Style="{StaticResource PrimaryButton}"
+                        Content="📋  Preview Data"
+                        Click="BtnPreview_Click"/>
+            </Grid>
+        </Border>
+
+        <!-- ═══ IMPORT OPTIONS ══════════════════════════════════════════════ -->
+        <Border Grid.Row="3" Style="{StaticResource Card}" Margin="0,0,0,12">
+            <Grid>
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                </Grid.RowDefinitions>
+
+                <!-- Row 1: Voucher Mode -->
+                <Grid Grid.Row="0" Margin="0,0,0,14">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="Auto"/>
+                        <ColumnDefinition Width="*"/>
+                    </Grid.ColumnDefinitions>
+
+                    <TextBlock Grid.Column="0"
+                               Text="📒  Voucher Mode"
+                               FontWeight="SemiBold" Foreground="#334155"
+                               VerticalAlignment="Center" Margin="0,0,28,0"/>
+
+                    <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
+
+                        <RadioButton x:Name="RadioPerProduct"
+                                     Style="{StaticResource OptionRadio}"
+                                     IsChecked="True"
+                                     GroupName="VoucherMode"
+                                     Checked="VoucherModeChanged">
+                            <StackPanel Orientation="Vertical">
+                                <TextBlock Text="One voucher per product"
+                                           FontWeight="SemiBold" Foreground="#1E293B"/>
+                                <TextBlock Foreground="#64748B" FontSize="11" Margin="0,2,0,0"
+                                           Text="Each row gets its own JUR number, Voucher record, and AccountsTransaction entries."/>
+                            </StackPanel>
+                        </RadioButton>
+
+                        <Border Width="1" Background="#E2E8F0" Margin="8,0,28,0" Height="36"/>
+
+                        <RadioButton x:Name="RadioBatchSingle"
+                                     Style="{StaticResource OptionRadio}"
+                                     GroupName="VoucherMode"
+                                     Checked="VoucherModeChanged">
+                            <StackPanel Orientation="Vertical">
+                                <TextBlock Text="One voucher for entire batch"
+                                           FontWeight="SemiBold" Foreground="#1E293B"/>
+                                <TextBlock Foreground="#64748B" FontSize="11" Margin="0,2,0,0"
+                                           Text="Single JUR for all rows. One Voucher + AccountsTransaction for the batch total at the end."/>
+                            </StackPanel>
+                        </RadioButton>
+
+                        <Border x:Name="BadgeVoucherMode"
+                                Background="#EFF6FF" CornerRadius="12"
+                                Padding="12,4" Margin="28,0,0,0"
+                                VerticalAlignment="Center">
+                            <TextBlock x:Name="TxtVoucherModeBadge"
+                                       Text="● Per Product"
+                                       FontSize="12" FontWeight="SemiBold"
+                                       Foreground="#2563EB"/>
+                        </Border>
+
+                    </StackPanel>
+                </Grid>
+
+                <!-- Divider -->
+                <Border Grid.Row="0" Height="1" Background="#F1F5F9"
+                        VerticalAlignment="Bottom" Margin="-20,0,-20,0"/>
+
+                <!-- Row 2: Barcode Option -->
+                <Grid Grid.Row="1" Margin="0,14,0,0">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="Auto"/>
+                        <ColumnDefinition Width="*"/>
+                    </Grid.ColumnDefinitions>
+
+                    <TextBlock Grid.Column="0"
+                               Text="🏷️  Barcode Labels"
+                               FontWeight="SemiBold" Foreground="#334155"
+                               VerticalAlignment="Center" Margin="0,0,28,0"/>
+
+                    <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
+
+                        <CheckBox x:Name="ChkInsertBarcodes"
+                                  Cursor="Hand"
+                                  VerticalContentAlignment="Center"
+                                  Checked="ChkInsertBarcodes_Changed"
+                                  Unchecked="ChkInsertBarcodes_Changed">
+                            <StackPanel Orientation="Vertical" Margin="6,0,0,0">
+                                <TextBlock Text="Insert barcode records into PrintBarCodes table"
+                                           FontWeight="SemiBold" Foreground="#1E293B" FontSize="13"/>
+                                <TextBlock Foreground="#64748B" FontSize="11" Margin="0,2,0,0"
+                                           Text="For each product row, inserts one PrintBarCodes record per unit of stock Qty. (e.g. Qty = 4 → 4 label rows)"/>
+                            </StackPanel>
+                        </CheckBox>
+
+                        <!-- Active badge — shown when checkbox is ticked -->
+                        <Border x:Name="BadgeBarcodeOption"
+                                Background="#FFF7ED" CornerRadius="12"
+                                BorderBrush="#FED7AA" BorderThickness="1"
+                                Padding="12,4" Margin="20,0,0,0"
+                                Visibility="Collapsed"
+                                VerticalAlignment="Center">
+                            <TextBlock x:Name="TxtBarcodeOptionBadge"
+                                       Text="🏷️ Barcodes ON"
+                                       FontSize="12" FontWeight="SemiBold"
+                                       Foreground="#C2410C"/>
+                        </Border>
+
+                    </StackPanel>
+                </Grid>
+
             </Grid>
         </Border>
 
         <!-- ═══ PREVIEW GRID ════════════════════════════════════════════════ -->
-        <Border Grid.Row="3" Style="{StaticResource Card}" Margin="0,0,0,14">
+        <Border Grid.Row="4" Style="{StaticResource Card}" Margin="0,0,0,12">
             <Grid>
                 <Grid.RowDefinitions>
                     <RowDefinition Height="Auto"/>
                     <RowDefinition Height="*"/>
                 </Grid.RowDefinitions>
 
-                <!-- Badge row -->
                 <Grid Grid.Row="0" Margin="0,0,0,12">
                     <Grid.ColumnDefinitions>
                         <ColumnDefinition Width="*"/>
@@ -129,6 +241,17 @@
                                        Text="0 rows" FontSize="12"
                                        FontWeight="SemiBold" Foreground="#2563EB"/>
                         </Border>
+                        <!-- Selection badge — visible when ≥1 row selected -->
+                        <Border x:Name="BadgeSelected"
+                                Background="#F0FDF4" CornerRadius="12"
+                                BorderBrush="#86EFAC" BorderThickness="1"
+                                Padding="10,3" Margin="8,0,0,0"
+                                Visibility="Collapsed">
+                            <TextBlock x:Name="TxtSelectedCount"
+                                       FontSize="12" FontWeight="SemiBold"
+                                       Foreground="#15803D"
+                                       Text="0 selected"/>
+                        </Border>
                         <Border x:Name="BadgeWarnings" Background="#FEF3C7" CornerRadius="12"
                                 Padding="10,3" Margin="8,0,0,0" Visibility="Collapsed">
                             <TextBlock x:Name="TxtWarningCount"
@@ -138,15 +261,16 @@
 
                     <TextBlock Grid.Column="1" VerticalAlignment="Center"
                                FontSize="11" Foreground="#94A3B8"
-                               Text="DB Name = truncated to 40 chars  ·  Size = extracted from product name"/>
+                               Text="DB Name = truncated to 40 chars  ·  Size = extracted from product name  ·  Total = Qty × Cost"/>
                 </Grid>
 
-                <!-- Data grid -->
                 <DataGrid Grid.Row="1"
                           x:Name="PreviewGrid"
                           AutoGenerateColumns="False"
                           IsReadOnly="True"
-                          MinHeight="150" MaxHeight="210"
+                          SelectionMode="Extended"
+                          SelectionChanged="PreviewGrid_SelectionChanged"
+                          MinHeight="120" MaxHeight="190"
                           BorderThickness="1" BorderBrush="#E2E8F0"
                           RowBackground="White"
                           AlternatingRowBackground="#F8FAFC"
@@ -157,41 +281,41 @@
 
                     <DataGrid.ColumnHeaderStyle>
                         <Style TargetType="DataGridColumnHeader">
-                            <Setter Property="Background"       Value="#F1F5F9"/>
-                            <Setter Property="Foreground"       Value="#475569"/>
-                            <Setter Property="FontWeight"       Value="SemiBold"/>
-                            <Setter Property="Padding"          Value="8,6"/>
-                            <Setter Property="BorderThickness"  Value="0,0,1,1"/>
-                            <Setter Property="BorderBrush"      Value="#E2E8F0"/>
+                            <Setter Property="Background"      Value="#F1F5F9"/>
+                            <Setter Property="Foreground"      Value="#475569"/>
+                            <Setter Property="FontWeight"      Value="SemiBold"/>
+                            <Setter Property="Padding"         Value="8,6"/>
+                            <Setter Property="BorderThickness" Value="0,0,1,1"/>
+                            <Setter Property="BorderBrush"     Value="#E2E8F0"/>
                         </Style>
                     </DataGrid.ColumnHeaderStyle>
 
                     <DataGrid.Columns>
                         <DataGridTextColumn Header="Row"
-                            Binding="{Binding RowNumber}"    Width="42"/>
+                            Binding="{Binding RowNumber}"     Width="42"/>
                         <DataGridTextColumn Header="Product Code"
-                            Binding="{Binding ProductCode}"  Width="135"/>
+                            Binding="{Binding ProductCode}"   Width="130"/>
                         <DataGridTextColumn Header="Brand"
-                            Binding="{Binding ProductBrand}" Width="95"/>
+                            Binding="{Binding ProductBrand}"  Width="90"/>
                         <DataGridTextColumn Header="Product Name (Original)"
-                            Binding="{Binding ProductName}"  Width="*"/>
+                            Binding="{Binding ProductName}"   Width="*"/>
                         <DataGridTextColumn Header="DB Name (≤40)"
-                            Binding="{Binding ProductNameDb}" Width="155"/>
+                            Binding="{Binding ProductNameDb}" Width="150"/>
                         <DataGridTextColumn Header="Size"
-                            Binding="{Binding ProductSize}"  Width="50"/>
+                            Binding="{Binding ProductSize}"   Width="50"/>
                         <DataGridTextColumn Header="Category"
-                            Binding="{Binding Category}"     Width="95"/>
+                            Binding="{Binding Category}"      Width="90"/>
                         <DataGridTextColumn Header="Group"
-                            Binding="{Binding Group}"        Width="85"/>
+                            Binding="{Binding Group}"         Width="80"/>
                         <DataGridTextColumn Header="Qty"
-                            Binding="{Binding Quantity}"     Width="55"/>
+                            Binding="{Binding Quantity}"      Width="55"/>
                         <DataGridTextColumn Header="Cost"
-                            Binding="{Binding CostPrice,    StringFormat=N2}" Width="75"/>
+                            Binding="{Binding CostPrice,     StringFormat=N2}" Width="75"/>
                         <DataGridTextColumn Header="Price"
-                            Binding="{Binding SellingPrice, StringFormat=N2}" Width="75"/>
-                        <DataGridTextColumn Header="Total Value"
-                            Binding="{Binding TotalValue,   StringFormat=N2}" Width="85"/>
-                        <DataGridTemplateColumn Header="✓" Width="38">
+                            Binding="{Binding SellingPrice,  StringFormat=N2}" Width="75"/>
+                        <DataGridTextColumn Header="Total"
+                            Binding="{Binding TotalValue,    StringFormat=N2}" Width="80"/>
+                        <DataGridTemplateColumn Header="✓" Width="36">
                             <DataGridTemplateColumn.CellTemplate>
                                 <DataTemplate>
                                     <TextBlock
@@ -207,22 +331,21 @@
         </Border>
 
         <!-- ═══ PROGRESS + ACTIONS ══════════════════════════════════════════ -->
-        <Border Grid.Row="4" Style="{StaticResource Card}" Margin="0,0,0,14">
+        <Border Grid.Row="5" Style="{StaticResource Card}" Margin="0,0,0,12">
             <Grid>
                 <Grid.RowDefinitions>
                     <RowDefinition Height="Auto"/>
                     <RowDefinition Height="Auto"/>
                 </Grid.RowDefinitions>
 
-                <!-- Badges + Buttons -->
                 <Grid Grid.Row="0" Margin="0,0,0,12">
                     <Grid.ColumnDefinitions>
                         <ColumnDefinition Width="*"/>
                         <ColumnDefinition Width="Auto"/>
                         <ColumnDefinition Width="Auto"/>
+                        <ColumnDefinition Width="Auto"/>
                     </Grid.ColumnDefinitions>
 
-                    <!-- Summary badges -->
                     <WrapPanel Grid.Column="0" Orientation="Horizontal" VerticalAlignment="Center">
                         <Border Background="#DCFCE7" CornerRadius="12" Padding="10,4" Margin="0,0,8,0">
                             <TextBlock x:Name="TxtNewCount"
@@ -239,10 +362,28 @@
                                        Text="⚠️ Skipped: 0"
                                        Foreground="#CA8A04" FontSize="12" FontWeight="SemiBold"/>
                         </Border>
-                        <Border Background="#FEE2E2" CornerRadius="12" Padding="10,4">
+                        <Border Background="#FEE2E2" CornerRadius="12" Padding="10,4" Margin="0,0,8,0">
                             <TextBlock x:Name="TxtErrorCount"
                                        Text="❌ Errors: 0"
                                        Foreground="#DC2626" FontSize="12" FontWeight="SemiBold"/>
+                        </Border>
+                        <!-- Barcode count badge — visible only when barcodes are enabled -->
+                        <Border x:Name="BadgeBarcodeCount"
+                                Background="#FFF7ED" CornerRadius="12"
+                                BorderBrush="#FED7AA" BorderThickness="1"
+                                Padding="10,4" Margin="0,0,8,0"
+                                Visibility="Collapsed">
+                            <TextBlock x:Name="TxtBarcodeCount"
+                                       Text="🏷️ Labels: 0"
+                                       Foreground="#C2410C" FontSize="12" FontWeight="SemiBold"/>
+                        </Border>
+                        <!-- Batch voucher badge — only visible in BatchSingle mode after import -->
+                        <Border x:Name="BadgeBatchVoucher"
+                                Background="#F0FDF4" CornerRadius="12"
+                                BorderBrush="#86EFAC" BorderThickness="1"
+                                Padding="10,4" Visibility="Collapsed">
+                            <TextBlock x:Name="TxtBatchVoucherNo"
+                                       Foreground="#15803D" FontSize="12" FontWeight="SemiBold"/>
                         </Border>
                     </WrapPanel>
 
@@ -254,16 +395,28 @@
                             IsEnabled="False"
                             Margin="0,0,10,0"/>
 
+                    <!-- Import Selected: only rows highlighted in the preview grid -->
                     <Button Grid.Column="2"
+                            x:Name="BtnImportSelected"
+                            Style="{StaticResource SecondaryButton}"
+                            Content="☑️  Import Selected"
+                            Click="BtnImportSelected_Click"
+                            IsEnabled="False"
+                            MinWidth="155"
+                            Margin="0,0,10,0"
+                            ToolTip="Import only the rows currently highlighted in the preview grid.&#x0A;Use Ctrl+Click to pick individual rows, Shift+Click for a range."/>
+
+                    <!-- Import All: every valid row regardless of selection -->
+                    <Button Grid.Column="3"
                             x:Name="BtnImport"
                             Style="{StaticResource SuccessButton}"
-                            Content="🚀  Import to SQL Server"
+                            Content="🚀  Export All"
                             Click="BtnImport_Click"
                             IsEnabled="False"
-                            MinWidth="185"/>
+                            MinWidth="140"
+                            ToolTip="Import all valid rows from the loaded Excel file."/>
                 </Grid>
 
-                <!-- Progress bar -->
                 <Grid Grid.Row="1">
                     <Grid.ColumnDefinitions>
                         <ColumnDefinition Width="*"/>
@@ -271,22 +424,87 @@
                     </Grid.ColumnDefinitions>
                     <ProgressBar x:Name="ImportProgress"
                                  Grid.Column="0"
-                                 Height="12"
-                                 Minimum="0" Maximum="100" Value="0"
-                                 Foreground="#2563EB"
-                                 Background="#E2E8F0"
+                                 Height="12" Minimum="0" Maximum="100" Value="0"
+                                 Foreground="#2563EB" Background="#E2E8F0"
                                  Margin="0,0,10,0"/>
-                    <TextBlock   Grid.Column="1"
-                                 x:Name="TxtProgressLabel"
-                                 Text="0%"
-                                 Foreground="#64748B" FontSize="12"
-                                 VerticalAlignment="Center"/>
+                    <TextBlock Grid.Column="1"
+                               x:Name="TxtProgressLabel"
+                               Text="0%"
+                               Foreground="#64748B" FontSize="12"
+                               VerticalAlignment="Center"/>
                 </Grid>
             </Grid>
         </Border>
 
+        <!-- ═══ DANGER ZONE ══════════════════════════════════════════════════ -->
+        <Border Grid.Row="6" Margin="0,0,0,12"
+                Background="#FFF5F5"
+                BorderBrush="#FECACA"
+                BorderThickness="1"
+                CornerRadius="8"
+                Padding="20,14">
+            <Grid>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="Auto"/>
+                    <ColumnDefinition Width="*"/>
+                    <ColumnDefinition Width="Auto"/>
+                </Grid.ColumnDefinitions>
+
+                <!-- Left: warning label + description -->
+                <StackPanel Grid.Column="0" Orientation="Vertical"
+                            VerticalAlignment="Center" Margin="0,0,28,0">
+                    <TextBlock Text="⚠️  Recall &amp; Delete"
+                               FontWeight="Bold" FontSize="13"
+                               Foreground="#991B1B"/>
+                    <TextBlock FontSize="11" Foreground="#B91C1C" Margin="0,3,0,0" TextWrapping="Wrap" MaxWidth="260">
+                        These operations are irreversible. A connection test is required before use.
+                    </TextBlock>
+                </StackPanel>
+
+                <!-- Centre: status text from last delete operation -->
+                <TextBlock Grid.Column="1"
+                           x:Name="TxtDeleteStatus"
+                           FontSize="12" Foreground="#64748B"
+                           VerticalAlignment="Center"
+                           TextWrapping="Wrap"
+                           Text="No delete operation run yet."/>
+
+                <!-- Right: action buttons -->
+                <StackPanel Grid.Column="2" Orientation="Horizontal"
+                            VerticalAlignment="Center">
+
+                    <!-- Recall: delete DB rows matching the current Excel file -->
+                    <Button x:Name="BtnRecall"
+                            Style="{StaticResource AmberButton}"
+                            IsEnabled="False"
+                            Click="BtnRecall_Click"
+                            Margin="0,0,10,0"
+                            ToolTip="Delete all DB records whose ProductCode matches the currently loaded Excel file.&#x0A;Requires the file to be previewed first.">
+                        <StackPanel Orientation="Vertical" HorizontalAlignment="Center">
+                            <TextBlock Text="🗑️  Recall from DB" FontWeight="SemiBold"/>
+                            <TextBlock Text="Delete rows matching Excel"
+                                       FontSize="10" Opacity="0.85" Margin="0,2,0,0"/>
+                        </StackPanel>
+                    </Button>
+
+                    <!-- Delete All: TRUNCATE every exporter table -->
+                    <Button x:Name="BtnDeleteAll"
+                            Style="{StaticResource DangerButton}"
+                            Click="BtnDeleteAll_Click"
+                            ToolTip="TRUNCATE all 10 tables written by this exporter.&#x0A;This cannot be undone — use only to do a complete reset.">
+                        <StackPanel Orientation="Vertical" HorizontalAlignment="Center">
+                            <TextBlock Text="💣  Delete All" FontWeight="SemiBold"/>
+                            <TextBlock Text="Truncate all exporter tables"
+                                       FontSize="10" Opacity="0.85" Margin="0,2,0,0"/>
+                        </StackPanel>
+                    </Button>
+
+                </StackPanel>
+            </Grid>
+        </Border>
+
         <!-- ═══ IMPORT LOG ═══════════════════════════════════════════════════ -->
-        <Border Grid.Row="5" Style="{StaticResource Card}">
+        <Border Grid.Row="7" Style="{StaticResource Card}">
             <Grid>
                 <Grid.RowDefinitions>
                     <RowDefinition Height="Auto"/>
