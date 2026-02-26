@@ -1,0 +1,35 @@
+name: Build WPF App
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Setup .NET 10
+      uses: actions/setup-dotnet@v4
+      with:
+        dotnet-version: 10.0.x
+
+    - name: Restore dependencies
+      run: dotnet restore Excel2SQLExporter.csproj
+
+    - name: Build application
+      run: dotnet build Excel2SQLExporter.csproj --configuration Release --no-restore
+
+    - name: Publish application
+      run: dotnet publish Excel2SQLExporter.csproj -c Release -r win-x64 --self-contained true --no-build -o publish
+
+    - name: Upload build artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: Excel2SQLExporter
+        path: publish
